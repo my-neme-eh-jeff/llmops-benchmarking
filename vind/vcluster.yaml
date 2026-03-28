@@ -1,0 +1,11 @@
+# vind cluster config for local development
+# vind = vCluster running with Docker driver (private nodes mode)
+# Docs: https://www.vcluster.com/docs
+
+experimental:
+  docker:
+    # Port forwards so we can reach cluster services from localhost
+    ports:
+      - "8000:8000"   # vLLM inference API
+      - "9090:9090"   # Prometheus
+      - "3301:3301"   # SigNoz UI

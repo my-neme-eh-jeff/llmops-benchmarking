@@ -1,0 +1,24 @@
+{{- if .Values.metrics.enabled }}
+# ServiceMonitor tells Prometheus Operator to scrape vLLM's /metrics endpoint.
+# vLLM exposes metrics like:
+#   vllm:num_requests_waiting    — queue depth (our primary KEDA trigger)
+#   vllm:gpu_cache_usage_perc    — KV cache utilization (early saturation signal)
+#   vllm:e2e_request_latency_seconds — TTFT + generation time distribution
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "vllm-server.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vllm-server.labels" . | nindent 4 }}
+    # This label must match the Prometheus Operator's serviceMonitorSelector
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      {{- include "vllm-server.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: {{ .Values.metrics.path }}
+      interval: 15s
+{{- end }}

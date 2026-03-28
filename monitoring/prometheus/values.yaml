@@ -1,0 +1,33 @@
+# kube-prometheus-stack values
+# Minimal config for local dev — just enough to scrape vLLM and feed KEDA
+
+grafana:
+  enabled: false   # We use SigNoz for dashboards, not Grafana
+
+prometheus:
+  prometheusSpec:
+    # Watch ServiceMonitors across all namespaces (needed to pick up vllm namespace)
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+
+    # Retention for local dev — no need to keep more
+    retention: 24h
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+# Disable components we don't need for local dev to keep resource usage low
+alertmanager:
+  enabled: false
+
+kubeStateMetrics:
+  enabled: true   # Useful to correlate pod restarts with scaling events
+
+nodeExporter:
+  enabled: false  # No bare-metal nodes in vind

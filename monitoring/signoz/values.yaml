@@ -1,0 +1,35 @@
+# SigNoz Helm values — local dev (vind cluster)
+# Docs: https://signoz.io/docs/install/kubernetes/others
+# Full values reference: https://github.com/SigNoz/charts/blob/main/charts/signoz/values.yaml
+
+global:
+  storageClass: local-path   # vind's default storage class (rancher local-path)
+
+# Trim ClickHouse replicas to 1 for local dev — default is 3 which is overkill
+clickhouse:
+  installCustomStorageClass: false
+  replicaCount: 1
+  zookeeper:
+    replicaCount: 1
+
+# SigNoz backend — single replica is fine locally
+queryService:
+  replicaCount: 1
+
+# SigNoz frontend (UI)
+frontend:
+  replicaCount: 1
+
+# SigNoz OTel collector — receives traces and metrics
+otelCollector:
+  replicaCount: 1
+
+# Reduce resource requests so this fits comfortably in a laptop
+clickhouse:
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi

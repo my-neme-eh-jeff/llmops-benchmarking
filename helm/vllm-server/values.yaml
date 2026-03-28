@@ -1,0 +1,60 @@
+# vLLM server Helm values
+# For local dev, we use a tiny CPU-compatible model.
+# For production (Sarvam-M), flip gpu.enabled and update model.name.
+
+model:
+  # Dev model: tiny, runs on CPU, no GPU needed
+  # Prod model: "sarvamai/sarvam-m" (requires GPU)
+  name: "facebook/opt-125m"
+  # HuggingFace token — required for gated models like Sarvam-M
+  hfToken: ""
+
+replicaCount: 1
+
+image:
+  repository: vllm/vllm-openai
+  tag: "v0.6.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+
+resources:
+  requests:
+    cpu: "2"
+    memory: "4Gi"
+  limits:
+    cpu: "4"
+    memory: "8Gi"
+    # GPU is disabled for local dev — vLLM falls back to CPU for small models.
+    # Uncomment for production:
+    # nvidia.com/gpu: "1"
+
+gpu:
+  enabled: false
+
+# vLLM server args
+# --disable-log-requests keeps logs clean during load tests
+# --max-model-len caps sequence length — important for KV cache sizing
+vllm:
+  args:
+    - "--host"
+    - "0.0.0.0"
+    - "--port"
+    - "8000"
+    - "--max-model-len"
+    - "2048"
+    - "--disable-log-requests"
+
+# Prometheus scraping — ServiceMonitor tells Prometheus where to scrape
+metrics:
+  enabled: true
+  # vLLM exposes /metrics on the same port as the inference API
+  path: /metrics
+  port: 8000
+
+autoscaling:
+  # We do NOT use HPA here — HPA uses CPU/memory which are meaningless for GPU inference.
+  # Scaling is handled by KEDA watching vllm:num_requests_waiting from Prometheus.
+  enabled: false
