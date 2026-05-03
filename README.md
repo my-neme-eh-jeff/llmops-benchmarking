@@ -1,299 +1,245 @@
 # GPU-Aware Autoscaler for LLM Inference on Kubernetes
 
-> **Status: Work in Progress** — Phase 0 (foundation) is partly scaffolded. GPU node pool, KEDA scaler chart, load tests, and SigNoz dashboards are under active development. See [Roadmap](#roadmap).
+A Kubernetes autoscaler that scales vLLM inference pods on **KV cache pressure** and **request queue depth** — not CPU. **Because CPU lies.**
 
-A production-style Kubernetes autoscaler for LLM inference. The clever bit isn't the autoscaler itself — it's *what it scales on*. Standard HPA reads CPU and memory, both of which are blind to GPU saturation on a vLLM pod. This project replaces them with **KV cache pressure** and **request queue depth** — the signals that actually predict latency.
+**Spike traffic → cache fills → autoscaler reads it as a leading indicator → KEDA adds a replica → cluster autoscaler provisions an L4 → TTFT stays flat.**
 
-Built around vLLM + KEDA + Prometheus + SigNoz on GKE Standard with NVIDIA L4 spot nodes.
+---
 
-## Motivation
+### For non-technical readers
 
-Most Kubernetes tutorials for LLM serving either use CPU-based HPA (the wrong metric) or skip autoscaling entirely. This project answers:
+vLLM is a popular LLM-serving engine. When traffic spikes, a regular Kubernetes autoscaler doesn't notice — because the bottleneck on a GPU server isn't CPU, it's GPU memory. By the time CPU rises, your users are already waiting.
 
-- **What's the right scaling signal for LLM serving?** Why do CPU and memory miss the boat, and what does vLLM expose that's actually predictive of user-facing latency?
-- **How do you get an *early warning* before TTFT spikes?** The difference between leading and lagging indicators in a system where pods take 30+ seconds to come up.
-- **How do you scale a stateful inference service?** Cold-start latency, model loading, replica warmup — none of these are problems an HPA tutorial covers.
-- **How do you tune cooldown without thrashing?** Spot GPUs get preempted on a daily-ish cadence; the autoscaler has to be patient.
-- **How do you observe a fleet of inference pods?** TTFT distributions, queue depth over time, replica count correlated with traffic — all in one dashboard.
+This project watches the right signal (GPU memory) and adds replicas *before* users feel pain.
 
-## Demo
+### For technical readers
 
-<!-- TODO: Record demo videos and link them here -->
+- KEDA watches `vllm:gpu_cache_usage_perc` (leading) and `vllm:num_requests_waiting` (lagging) from a Prometheus-scraped vLLM `/metrics` endpoint.
+- Crossing 85% KV-cache usage triggers scale-up *before* the queue builds, giving the cluster autoscaler ~30s of headroom to provision an L4 spot node before users see TTFT spikes.
+- Both triggers run via a single `ScaledObject`. KEDA takes the max of the desired replica counts.
+- Deployment is GKE Standard + `g2-standard-8` spot pool, `NoSchedule`-tainted so only vLLM pods land on it. `minReplicaCount: 0` lets the pool drain to zero between bursts — hourly cost drops to ~$0.10 (control plane only).
+- Helm-packaged for two shapes: `vind` (local CPU dev with `opt-125m`) and GKE GPU prod (`Qwen3-8B-Instruct AWQ-INT4` on L4).
 
-### Walkthrough script (what to show in order)
+---
 
-1. **Idle cluster** — 0 vLLM pods, 0 GPU nodes. Hourly cost: ₹0.
-2. **Steady traffic** — Locust ramps to 5 RPS. KEDA spins up 1 vLLM pod. The cluster autoscaler provisions a fresh L4 spot node.
-3. **Burst** — Locust spikes to 50 RPS. Watch `vllm:gpu_cache_usage_perc` cross 85% *before* the request queue starts building.
-4. **Scale up** — KEDA detects the leading indicator and scales to 3 pods over ~90 seconds.
-5. **TTFT stays flat** — SigNoz dashboard shows p99 TTFT didn't spike during the burst. That's the whole point — we scaled before users felt pain.
-6. **Scale down** — Locust quiets, KEDA scales back to 0 after the cooldown, GPU node drains and is reclaimed.
-7. **Cost summary** — total spend for the demo: under ₹150 (~$2 USD).
+## 🚀 Try it live
 
-## How it works
-
-```
-                    ┌──────────────┐
-                    │   Locust     │  Bursty inference traffic
-                    │  Load Test   │  (Hindi/English prompts, variable lengths)
-                    └──────┬───────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────┐
-│                  GKE Cluster                     │
-│  ┌────────┐    ┌────────┐    ┌────────┐         │
-│  │ vLLM   │    │ vLLM   │    │ vLLM   │  ◄──┐  │
-│  │ Pod 1  │    │ Pod 2  │    │ Pod N  │     │  │
-│  │ (L4)   │    │ (L4)   │    │ (L4)   │     │  │
-│  └───┬────┘    └───┬────┘    └───┬────┘     │  │
-│      │             │             │           │  │
-│      └─────────┬───┴─────────────┘           │  │
-│                │ /metrics                     │  │
-│                ▼                              │  │
-│  ┌──────────────────┐    ┌──────────────┐    │  │
-│  │   Prometheus      │───▶│    KEDA      │────┘  │
-│  │ (scrapes metrics) │    │ (autoscaler) │       │
-│  └────────┬─────────┘    └──────────────┘       │
-│           │                                      │
-│           ▼                                      │
-│  ┌──────────────────┐                            │
-│  │     SigNoz       │  Dashboards & alerting     │
-│  └──────────────────┘                            │
-└─────────────────────────────────────────────────┘
+```bash
+curl -X POST <API>/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-8B-Instruct-AWQ",
+    "messages": [{"role": "user", "content": "Explain KV cache eviction in three sentences."}],
+    "max_tokens": 256
+  }'
 ```
 
-### The metric story
+The cluster is brought up only for demos, so live URLs aren't pinned here. They appear in the demo video.
 
-KEDA watches these vLLM Prometheus metrics, not CPU/memory:
+## 🎬 Demo video
 
-| Metric | What it is | Why it matters |
+*Coming soon!*
+
+---
+
+## 📐 Architecture
+
+```mermaid
+flowchart TB
+    Internet((Locust Load Test))
+
+    subgraph GKE["GKE Standard · asia-southeast1"]
+        direction TB
+
+        subgraph VNS["vllm namespace"]
+            PODS["vLLM pods (L4)<br/>0 → 3 replicas"]
+            SO["KEDA ScaledObject"]
+        end
+
+        subgraph MNS["monitoring namespace"]
+            PROM["Prometheus<br/>scrapes /metrics every 15s"]
+        end
+
+        subgraph PNS["platform namespace"]
+            SIG["SigNoz<br/>TTFT · KV cache · replica count"]
+        end
+
+        subgraph KNS["keda namespace"]
+            KEDA["KEDA Operator"]
+        end
+    end
+
+    subgraph POOLS["GKE node pools"]
+        SYS["n2-standard-2 × 2<br/>system pods"]
+        GPU["g2-standard-8 × (0-3)<br/>L4 spot · NoSchedule taint"]
+    end
+
+    Internet -->|chat completions| PODS
+    PODS -.->|/metrics| PROM
+    PROM -->|gpu_cache_usage_perc<br/>num_requests_waiting| KEDA
+    KEDA -->|drives| SO
+    SO -->|scales 0-3| PODS
+    PROM --> SIG
+
+    PODS -. lands on .-> GPU
+    PROM -. lands on .-> SYS
+    SIG -. lands on .-> SYS
+    KEDA -. lands on .-> SYS
+```
+
+### What's deployed
+
+| # | Component | Where |
 |---|---|---|
-| `vllm:num_requests_waiting` | Requests queued because all KV cache slots are taken | **Lagging indicator.** If this is non-zero, you're already late — but it's the most direct "we're under-provisioned" signal. |
-| `vllm:gpu_cache_usage_perc` | Fraction of KV cache memory in use | **Leading indicator.** When this hits ~85%, TTFT begins spiking *before* the queue builds. This is what gives the autoscaler early warning. |
-| `vllm:e2e_request_latency_seconds` (TTFT histogram) | End-to-end and TTFT distributions | The actual user-facing metric we're protecting. SigNoz dashboards plot p50/p95/p99. |
-| `vllm:tokens_per_second` (derived) | Throughput per pod | Detects saturation when the queue is temporarily empty but the GPU is fully loaded. |
+| 1 | vLLM serving pods | GKE GPU pool (L4 spot) |
+| 2 | KEDA `ScaledObject` | `vllm` namespace |
+| 3 | Prometheus + `ServiceMonitor` | `monitoring` namespace |
+| 4 | SigNoz (traces + metrics) | `platform` namespace |
 
-The key insight: **using both the leading and the lagging indicator together gives responsive autoscaling**. The leading indicator scales us up before users feel pain; the lagging one is a safety net for traffic shapes the leading indicator misses.
+---
 
-## Companion project
+## 📊 What KEDA actually watches
 
-This is the **serving and autoscaling** side of an end-to-end MLOps story. The **training, experiment tracking, model registry, and GitOps deployment** side lives in [`customer_churn_CICD`](https://github.com/my-neme-eh-jeff/customer_churn_CICD) (DVC + MLflow + Kubeflow Pipelines + ArgoCD on GKE Autopilot, plus an LLM-driven autonomous research loop). Together they cover the full lifecycle:
+Two triggers. KEDA evaluates each independently and scales to the max of the desired replica counts.
 
-| Concern | Project |
-|---|---|
-| Reproducible data + experiments | customer_churn (DVC + MLflow) |
-| Model registry, champion/challenger | customer_churn (MLflow registry) |
-| Continuous training + auto-research | customer_churn (Kubeflow Pipelines + auto-loop) |
-| GitOps deployment of model artifacts | customer_churn (ArgoCD) |
-| **GPU-aware inference serving** | **autoscaler (this repo)** |
-| **LLM-native autoscaling** | **autoscaler (this repo)** |
-| **Inference observability (TTFT, KV cache, queue depth)** | **autoscaler (this repo)** |
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Locust
+    participant vLLM
+    participant Prom as Prometheus
+    participant KEDA
+    participant CA as Cluster Autoscaler
 
-## Tech Stack
+    Locust->>vLLM: 5 RPS steady
+    vLLM->>Prom: gpu_cache_usage_perc = 0.4
+    Note over KEDA: 0.4 < 0.85, hold at 1 replica
 
-| Component | Technology | Why |
-|-----------|-----------|-----|
-| Model serving | [vLLM](https://docs.vllm.ai) | PagedAttention for efficient KV cache management; native Prometheus metrics; the 2026 production default per [Hao AI Lab retrospective](https://haoailab.com/blogs/distserve-retro/) |
-| Autoscaler | [KEDA](https://keda.sh) | Event-driven scaling on custom Prometheus queries — standard HPA can't query custom metrics natively without an external adapter |
-| Metrics | [Prometheus](https://prometheus.io) | Scrapes vLLM `/metrics`, feeds KEDA scaling decisions via the `prometheus` scaler |
-| Observability | [SigNoz](https://signoz.io) | OpenTelemetry-native, single-pane-of-glass for traces + metrics + logs |
-| Load testing | [Locust](https://locust.io) | Scriptable bursty traffic patterns in plain Python |
-| Infrastructure | Terraform + GKE Standard | GKE Standard is required for fine-grained GPU node-pool control (Autopilot abstracts that away) |
-| Packaging | Helm | Multiple parameterized environments (vind dev, GKE GPU prod) — too much variance for raw YAML |
-| Local dev | [vind](https://github.com/loft-sh/vind) | vCluster in Docker — native LoadBalancer, pause/resume |
-| GPU model (dev) | `Qwen/Qwen2.5-0.5B-Instruct` | Tiny, runs on CPU for vind / RTX 2060 |
-| GPU model (prod demo) | `Qwen/Qwen3-8B-Instruct-AWQ` | Popular 2026 open model from Alibaba; fits on a single L4 (24GB VRAM) with KV cache headroom; demonstrably saturable under bursty load |
+    Locust->>vLLM: burst → 50 RPS
+    vLLM->>Prom: gpu_cache_usage_perc = 0.86
+    Prom->>KEDA: 0.86 > 0.85 (leading!)
+    KEDA->>CA: desired = 2
+    CA->>CA: provision L4 spot node
+    CA-->>vLLM: pod 2 schedules
+    Note over vLLM: queue stays at 0<br/>TTFT p99 stays flat
 
-## Repository Structure
-
-```
-autoscaler/
-├── README.md                  # This file
-├── CLAUDE.md                  # Dev context for Claude Code
-├── EXPLANATION.md             # Deep technical walkthrough (the "why" of every decision)
-├── Makefile                   # All dev commands
-├── pyproject.toml             # uv-managed Python deps for load-test + scripts
-│
-├── gcp/                       # Terraform IaC
-│   ├── main.tf                # GKE Standard cluster + VPC + networking
-│   ├── gpu-pool.tf            # L4 spot node pool (taints, autoscale 0→3)
-│   ├── variables.tf
-│   ├── providers.tf
-│   ├── terraform.tfvars       # gitignored — project-specific
-│   └── README.md
-│
-├── helm/
-│   ├── vllm-server/           # vLLM Deployment + Service + ServiceMonitor
-│   │   ├── values.yaml          # default: GPU production (L4 + Mistral-7B AWQ)
-│   │   ├── values-cpu-dev.yaml  # vind override: opt-125m on CPU
-│   │   └── templates/
-│   └── keda-scaler/           # KEDA ScaledObject (KV cache + queue depth triggers)
-│       ├── values.yaml
-│       └── templates/
-│           └── scaledobject.yaml
-│
-├── monitoring/
-│   ├── prometheus/            # kube-prometheus-stack values + recording rules
-│   └── signoz/                # SigNoz Helm values + dashboards (importable JSON)
-│
-├── load-test/                 # Locust scripts
-│   ├── locustfile.py
-│   ├── prompts.py             # Realistic Indian-language prompt corpus
-│   └── scenarios/             # steady / burst / soak
-│
-├── vind/                      # Local vCluster config
-│
-└── scripts/                   # One-off helpers (bootstrap, port-forward, verify)
+    Locust->>vLLM: traffic dies
+    vLLM->>Prom: gpu_cache_usage_perc = 0.1
+    Note over KEDA: cooldown 300s
+    KEDA->>CA: desired = 0
+    CA->>CA: drain L4 node
 ```
 
-## Quick Start
+### Why `gpu_cache_usage_perc` is the leading indicator
 
-### Prerequisites
+When vLLM's PagedAttention cache fills past ~85%, it starts evicting blocks. Eviction breaks request affinity — partial generations re-prefill from scratch, which is expensive. TTFT spikes here, **before** the request queue builds.
 
-- A GCP project with a paid billing account (free-trial credits are fine and apply to GPU spend after upgrade — see [Cost transparency](#cost-transparency))
-- L4 GPU quota approved in your target region (default: `asia-south1`)
-- Tools: `gcloud`, `terraform` (>=1.6), `kubectl` (>=1.30), `helm` (>=3), `uv` (Python)
+Watching `num_requests_waiting` alone is too late: by the time the queue is non-zero, users are already feeling latency. Watching CPU is even later — vLLM rarely saturates CPU before GPU memory.
 
-### Provision GKE + GPU pool
+### Why KEDA, not HPA
+
+HPA can't natively query custom Prometheus metrics. The workaround is `prometheus-adapter`, which exposes them as Kubernetes custom metrics — a fragile two-hop with its own controller and CRDs. KEDA is built for this exact case: declare a `ScaledObject` with a `prometheus` trigger, done. (KEDA generates an HPA under the hood, so this isn't a parallel autoscaler — it's the right primitive in front of the same machinery.)
+
+---
+
+## 🧪 The metrics that matter
+
+| Metric | Type | Why |
+|---|---|---|
+| `vllm:gpu_cache_usage_perc` | **Leading** | Fills before the queue builds. Threshold: 0.85. |
+| `vllm:num_requests_waiting` | **Lagging** | Queue depth = "we're already over capacity". Threshold: 5. |
+| `vllm:e2e_request_latency_seconds` | User-facing | The thing we're protecting. Plotted as p50/p95/p99. |
+| `vllm:tokens_per_second` | Throughput | Detects saturation when the queue is briefly empty but the GPU is full. |
+
+CPU and memory are explicitly NOT used. There's a comment in `helm/vllm-server/values.yaml` next to the disabled HPA block explaining why.
+
+---
+
+## ⚡ Quick start
+
+### Local dev (`vind`, no GPU required)
+
+```bash
+make cluster-up                      # spawn local vcluster
+make install-keda
+make install-prometheus
+make install-vllm-cpu-dev            # opt-125m on CPU
+make install-keda-scaler
+make load-test                       # bursty Locust pattern
+```
+
+### GKE production
 
 ```bash
 cd gcp/
 cp terraform.tfvars.example terraform.tfvars   # then fill in your project ID
-terraform init
-terraform plan
-terraform apply       # ~8-10 minutes for cluster + node pool
+terraform apply
 
 gcloud container clusters get-credentials autoscaler-gke \
-  --region asia-south1 --project <your-project-id>
+  --region asia-southeast1 --project <your-project>
+
+make install-keda install-prometheus install-signoz install-vllm install-keda-scaler
+make metrics                         # verify scraping
+make load-test                       # 5 min bursty traffic
 ```
 
-### Install the stack
+---
 
-```bash
-make install-keda
-make install-prometheus
-make install-signoz
-make install-vllm
-make install-keda-scaler
+## 🔁 Why Helm
 
-make metrics          # verify vLLM /metrics is being scraped
-```
+Two deployment shapes today, three planned:
 
-### Run a load test
-
-```bash
-make load-test        # 5 minutes of bursty traffic, watch SigNoz
-```
-
-### Tear down (avoid surprise spend)
-
-```bash
-make tear-down        # uninstall charts
-cd gcp/ && terraform destroy
-```
-
-### Local dev (no GPU, vind)
-
-```bash
-make cluster-up               # spawn local vind cluster
-make install-vllm-cpu-dev     # opt-125m on CPU
-make load-test                # works against local cluster too
-make cluster-pause            # save laptop battery between sessions
-```
-
-## Cost transparency
-
-This project is built to run on GCP free-trial credits *after* upgrading the billing account to "Paid account" status (which unlocks GPUs). All GPU spend draws from the trial credit pool until exhausted; only then does the attached card get charged.
-
-| Component | Hourly cost (approx) |
+| Shape | Why it exists |
 |---|---|
-| GKE Standard control plane | ~$0.10 |
-| 1× L4 spot node (`g2-standard-8`) | ~$0.30 |
-| 100GB pd-balanced disk | ~$0.04 |
-| Prometheus + SigNoz on `n2-standard-2` (always-on) | ~$0.10 |
+| `vind` local CPU dev | Fast iteration, no GPU spend |
+| GKE GPU prod | The actual demo target |
+| Future PD-disaggregated | Phase 4 — separate prefill / decode pools |
 
-**Realistic project spend with KEDA scale-to-zero + 1-hour daily demo cadence: $20-50 across 2-3 months.** The whole project sits comfortably inside the standard $300 trial credit. (See `EXPLANATION.md` and `docs/COST.md` for a line-item breakdown after the demo runs.)
+Three values files + one chart beats three duplicated copies of every manifest. Templating earns its keep here.
 
-The cluster is designed to be spun up for demo runs and torn down between sessions. `make tear-down && terraform destroy` brings hourly cost to ~$0.
+---
 
-## Honest limitations
+## ☁️ Infrastructure
 
-- **Single zone.** `asia-south1-a` only — no HA. A zone outage takes the demo down.
-- **Single GPU type.** Built and tested only on L4. T4 should work but is too small for credible KV-cache-pressure demos with a 7B model. A100 works but burns trial credit fast.
-- **Spot preemption.** L4 spot can be reclaimed in 30 seconds with no warning. KEDA cooldown absorbs this in normal operation, but during a *recorded* demo, switch the node pool to on-demand briefly to avoid mid-recording preemption.
-- **Demo-grade observability.** SigNoz runs single-replica with reduced retention. A production deployment would need ClickHouse HA + ≥30-day retention.
-- **Synthetic load.** Locust patterns are bursty but synthetic. Real Sarvam-style traffic mixes much higher prompt-length variance, multi-turn agent loops, and per-tenant patterns.
-- **No PD-disaggregation, no multi-LoRA, no speculative decoding** in Phase 0. Those are explicit follow-on phases — see [Roadmap](#roadmap).
+| Component | What |
+|---|---|
+| GKE Standard | Required for per-pool GPU configuration; Autopilot abstracts it away |
+| GPU node pool | `g2-standard-8` × (0-3), 1× L4 each, **Spot**, `nvidia.com/gpu=present:NoSchedule` taint |
+| Default pool | `n2-standard-2` × 2, system pods + KEDA + Prometheus + SigNoz |
+| Region | `asia-southeast1` (Singapore) — closest L4 capacity for South Asia |
+| Workload Identity | Enabled |
+| State | Terraform; `terraform.tfvars.example` is checked in, real `tfvars` is gitignored |
 
-## Known infra quirks
+---
 
-- **vLLM readiness probe needs ≥30s for cold start.** A 7B AWQ model loads in ~25-40s on L4. Default probes (10s initial + 1s period + 3 failures) kill the pod before the model finishes loading.
-- **ServiceMonitor must be labeled `release: prometheus`.** kube-prometheus-stack's `serviceMonitorSelector` defaults to that label. Without it, Prometheus silently doesn't scrape — no error, just an empty target list.
-- **AWQ models on vLLM need explicit `--quantization awq`.** vLLM doesn't auto-detect from the model card; pass it as a server flag.
-- **L4 spot preemption is roughly daily** with ~30s drain notice. KEDA's 300s cooldown absorbs this in normal operation, but switch to on-demand briefly when recording demos.
+## 🛠️ Tools and why
 
-## GitOps and packaging — why Helm here, raw YAML in customer_churn
+| Tool | Why |
+|---|---|
+| **vLLM** | PagedAttention, OpenAI-compatible API, native Prometheus metrics. The 2026 reference engine. |
+| **KEDA** | The only K8s autoscaler that natively takes Prometheus queries as scaling triggers. |
+| **Prometheus + ServiceMonitor** | Standard. kube-prometheus-stack with the `release: prometheus` label selector. |
+| **SigNoz** | OpenTelemetry-native single-platform observability. TTFT histograms, queue-depth timelines, replica count overlay. |
+| **Locust** | Python-native bursty patterns; mixed prompt-length corpora are easy to express. |
+| **Terraform** | Reproducible cluster, parameterized. AKS / EKS portable in principle. |
+| **Helm** | Multiple deployment shapes share a chart cleanly. |
+| **vind** | vCluster in Docker. Native LoadBalancer, pause / resume the laptop cluster between sessions. |
 
-[customer_churn](https://github.com/my-neme-eh-jeff/customer_churn_CICD) deliberately uses raw YAML manifests + ArgoCD because it has 4 manifests, one environment, and no templating need. This project uses Helm because it has *three* deployment shapes:
+---
 
-- vind local dev (CPU model, no GPU node pool, debug logging)
-- GKE GPU production (L4 + AWQ model + tolerations + nodeSelector)
-- Future llm-d / disaggregated layout (Phase 4)
+## 🗺️ Roadmap
 
-That's enough variance that Helm's `values.yaml` + per-environment overrides pay for themselves — without templating, you'd be maintaining three near-duplicate copies of every manifest.
+- **PD-disaggregated serving** — separate prefill and decode pools, scale each on its own bottleneck. Mooncake / DistServe-style. The headline 2026 inference architecture.
+- **Multi-LoRA serving** — one base model + N adapters, header-routed, per-tenant rate limits. Punica / S-LoRA kernels in vLLM.
+- **EAGLE-3 speculative decoding** — measure 1.5-3× decode speedup with full latency + acceptance-rate eval.
+- **Quantization comparison** — FP16 vs FP8 vs AWQ-INT4 on a 7B model: accuracy, throughput, TTFT, VRAM.
+- **Token-level OTel tracing** — cost-per-1M-tokens dashboards, per-tenant TTFT P99 alerts.
 
-This is a deliberate engineering judgment, not a stylistic flip. Both projects are correct for their scale.
+### Current scope
 
-## Tools and Why
+A side project to learn the LLM-inference layer of MLOps end-to-end. Not a 5-nines production deployment.
 
-| Tool | Role | Why |
-|------|------|-----|
-| **vLLM** | LLM serving engine | PagedAttention; OpenAI-compatible API; native Prometheus metrics; the 2026 production default |
-| **KEDA** | Event-driven autoscaler | The only K8s autoscaler that natively supports Prometheus queries as scaling triggers |
-| **Prometheus** | Metrics backend | Standard. ServiceMonitor + kube-prometheus-stack is the K8s default |
-| **SigNoz** | Observability platform | OpenTelemetry-native, single platform for traces + metrics + logs, great UX for TTFT histograms |
-| **Locust** | Load tester | Python-native bursty patterns; Hindi/English prompt corpora easy to express in plain code |
-| **Terraform** | Infra-as-code | Reproducible cluster, parameterized via tfvars, swap-friendly to AKS/EKS in principle |
-| **GKE Standard** | Managed Kubernetes | Required for per-node-pool GPU configuration; Autopilot abstracts that away |
-| **Helm** | Manifest packaging | Multi-environment (vind dev / GKE GPU prod / future llm-d) with values overrides |
-| **vind** | Local Kubernetes | Native LoadBalancer; pause/resume saves laptop battery between sessions |
-| **uv** | Python package manager | Fast, replaces pip/poetry/pyenv |
-
-## Roadmap
-
-### Phase 0 — Foundation (in progress)
-- [x] Repo scaffold
-- [x] Helm chart skeleton for vLLM (Deployment, Service, ServiceMonitor)
-- [x] Terraform IaC for GKE Standard cluster (CPU-only base pool)
-- [x] kube-prometheus-stack values
-- [x] SigNoz values
-- [x] vind local config
-- [ ] L4 spot GPU node pool in Terraform
-- [ ] vLLM Helm values for GPU production (Mistral-7B-Instruct AWQ)
-- [ ] KEDA ScaledObject Helm chart (KV cache + queue depth triggers)
-- [ ] Locust load-test scripts (steady / burst / soak)
-- [ ] Prometheus recording rules for derived metrics
-- [ ] SigNoz dashboards (TTFT distribution, KV cache, replica count, autoscaler events)
-- [ ] End-to-end demo recorded
-
-### Phase 1 — Multi-LoRA serving
-A single vLLM base model + 10 LoRA adapters, routed by request header. Per-tenant rate limiting via Redis. The pattern Sarvam asks about in MLOps JDs ([Punica/S-LoRA](https://github.com/punica-ai/punica)).
-
-### Phase 2 — Quantization comparison harness
-Benchmark FP16 / FP8 / AWQ-INT4 on a 7B model: accuracy (MMLU-Pro, HumanEval+), throughput, TTFT, VRAM. Blog-shaped writeup.
-
-### Phase 3 — EAGLE-3 speculative decoding
-Deploy [EAGLE-3](https://github.com/SafeAILab/EAGLE) with vLLM, measure 2× decode speedup, full latency + quality eval. The 2026 ML-Engineer-signal project.
-
-### Phase 4 — PD-disaggregated autoscaler with llm-d
-Extend Phase 0 into the headline 2026 architecture: separate prefill and decode pools, scale each independently with KEDA, KV-cache-aware routing via [llm-d](https://llm-d.ai).
-
-## Why this matters
-
-If you're hiring for an MLOps Engineer or ML Engineer (Inference) role at an Indian AI startup like Sarvam, Krutrim, or Yotta — the JDs explicitly ask for vLLM, Triton, GGUF/AWQ/GPTQ quantization, Kubernetes, Prometheus/Grafana. This project hits five of those bullets with one demo. Phases 1-3 hit the rest.
-
-For interviewers: the demo runs in 5 minutes, costs less than ₹150, and produces a single dashboard view that shows the autoscaler responding to KV-cache pressure 30 seconds before the request queue builds — the difference between an "I read the vLLM blog" portfolio and an "I have run this in production" portfolio.
-
-## License
-
-MIT
+- Single zone. A zone outage takes the demo down.
+- L4 spot can be preempted mid-load-test (rare). Switch to on-demand for recorded demos.
+- Synthetic Locust load. Real production traffic mixes much higher prompt-length variance.
+- No PD-disaggregation, multi-LoRA, or spec decoding *yet* — those are Roadmap items, not omissions.
