@@ -1,0 +1,35 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ .Values.target.deploymentName }}-scaler
+  namespace: {{ .Values.target.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  scaleTargetRef:
+    name: {{ .Values.target.deploymentName }}
+  pollingInterval: {{ .Values.pollingInterval }}
+  cooldownPeriod: {{ .Values.cooldownPeriod }}
+  minReplicaCount: {{ .Values.minReplicaCount }}
+  maxReplicaCount: {{ .Values.maxReplicaCount }}
+  triggers:
+    {{- if .Values.triggers.kvCacheUsage.enabled }}
+    # Leading indicator — KV cache pressure (scale BEFORE the queue builds)
+    - type: prometheus
+      metadata:
+        serverAddress: {{ .Values.prometheus.address | quote }}
+        metricName: vllm_gpu_cache_usage_perc
+        threshold: {{ .Values.triggers.kvCacheUsage.threshold | quote }}
+        query: {{ .Values.triggers.kvCacheUsage.query | quote }}
+    {{- end }}
+    {{- if .Values.triggers.requestsWaiting.enabled }}
+    # Lagging indicator — request queue depth (safety net)
+    - type: prometheus
+      metadata:
+        serverAddress: {{ .Values.prometheus.address | quote }}
+        metricName: vllm_num_requests_waiting
+        threshold: {{ .Values.triggers.requestsWaiting.threshold | quote }}
+        query: {{ .Values.triggers.requestsWaiting.query | quote }}
+    {{- end }}

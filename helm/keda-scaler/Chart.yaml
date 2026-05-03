@@ -1,0 +1,6 @@
+apiVersion: v2
+name: keda-scaler
+description: KEDA ScaledObject for GPU-aware vLLM autoscaling — scales pods on KV-cache pressure (leading) and request queue depth (lagging) instead of CPU.
+type: application
+version: 0.1.0
+appVersion: "1.0"

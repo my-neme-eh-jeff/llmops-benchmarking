@@ -1,0 +1,43 @@
+# vLLM Helm values — LOCAL CPU DEV OVERRIDE (for vind / RTX 2060 / no GPU node).
+# Use with:
+#   helm install vllm-server helm/vllm-server -f helm/vllm-server/values-cpu-dev.yaml
+#
+# This switches to a tiny CPU-friendly model and removes all GPU-related config
+# so the pod can schedule on a regular node. Inference will be slow but the
+# whole pipeline (Prometheus → KEDA → autoscaling decisions) works correctly,
+# which is what we're verifying locally before paying for L4 cloud time.
+
+model:
+  # 125M params, runs on CPU, ~50ms per token on a laptop. Fine for plumbing tests.
+  # Swap to "Qwen/Qwen2.5-0.5B-Instruct" if you want a better-behaving small model.
+  name: "facebook/opt-125m"
+  hfToken: ""
+
+replicaCount: 1
+
+# Drop GPU resource requests
+resources:
+  requests:
+    cpu: "1"
+    memory: "2Gi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"
+
+gpu:
+  enabled: false
+
+# No GPU node pool locally; clear scheduling constraints.
+nodeSelector: {}
+tolerations: []
+
+# Smaller context window — opt-125m's max is 2048 anyway.
+vllm:
+  args:
+    - "--host"
+    - "0.0.0.0"
+    - "--port"
+    - "8000"
+    - "--max-model-len"
+    - "1024"
+    - "--disable-log-requests"

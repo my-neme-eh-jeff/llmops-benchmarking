@@ -44,14 +44,19 @@ spec:
             requests:
               cpu: {{ .Values.resources.requests.cpu | quote }}
               memory: {{ .Values.resources.requests.memory | quote }}
+              {{- if .Values.gpu.enabled }}
+              nvidia.com/gpu: "1"
+              {{- end }}
             limits:
               cpu: {{ .Values.resources.limits.cpu | quote }}
               memory: {{ .Values.resources.limits.memory | quote }}
               {{- if .Values.gpu.enabled }}
               nvidia.com/gpu: "1"
               {{- end }}
-          # vLLM takes time to load the model — readiness probe prevents traffic
-          # before the model is fully loaded into memory.
+          # vLLM takes time to load the model. On L4 with a 7-8B AWQ model,
+          # weight load is ~25-40s. Default probes (10s initial, 1s period,
+          # 3 failures) would kill the pod before it finishes loading — these
+          # values give it 30 + 6×10 = 90s before declaring unready.
           readinessProbe:
             httpGet:
               path: /health
@@ -65,3 +70,11 @@ spec:
               port: 8000
             initialDelaySeconds: 60
             periodSeconds: 20
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

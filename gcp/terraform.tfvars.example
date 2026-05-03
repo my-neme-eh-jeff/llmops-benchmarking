@@ -1,0 +1,35 @@
+# Copy this file to terraform.tfvars and fill in your own values.
+# terraform.tfvars is gitignored so your project ID stays out of source control.
+
+# REQUIRED
+gcp_project_id = "your-gcp-project-id"
+
+# Region / zone — pick one where you have NVIDIA L4 GPU quota.
+# asia-southeast1 (Singapore) is a good default for users in India / South-East Asia.
+gcp_region   = "asia-southeast1"
+cluster_zone = "asia-southeast1-a"
+
+# Cluster naming
+cluster_name = "autoscaler-gke"
+
+# Default (CPU) node pool sizing — used for system pods, KEDA, Prometheus, SigNoz.
+node_count     = 2
+min_node_count = 2
+max_node_count = 4
+machine_type   = "n2-standard-2"
+disk_size_gb   = 100
+
+# GPU node pool — picked up by gpu-pool.tf. L4 on g2 is the sweet spot
+# for a 7-8B AWQ model + meaningful KV cache.
+gpu_machine_type     = "g2-standard-8"
+gpu_accelerator_type = "nvidia-l4"
+gpu_max_nodes        = 3
+
+# Networking — leave the defaults unless you have CIDR conflicts.
+network_name      = "autoscaler-network"
+subnetwork_name   = "autoscaler-subnet"
+ip_range_pods     = "10.1.0.0/16"
+ip_range_services = "10.2.0.0/16"
+
+# Security
+enable_workload_identity = true

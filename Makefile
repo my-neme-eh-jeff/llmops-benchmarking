@@ -57,10 +57,30 @@ signoz-ui: ## Port-forward SigNoz UI to localhost:8080
 	kubectl port-forward -n platform $$POD 8080:8080
 
 .PHONY: install-vllm
-install-vllm: ## Deploy vLLM server
+install-vllm: ## Deploy vLLM server (GPU production — L4 + Qwen3-8B AWQ)
 	helm install vllm-server helm/vllm-server \
 		--namespace vllm --create-namespace \
 		--values helm/vllm-server/values.yaml
+
+.PHONY: install-vllm-cpu-dev
+install-vllm-cpu-dev: ## Deploy vLLM server with CPU dev override (vind / no GPU)
+	helm install vllm-server helm/vllm-server \
+		--namespace vllm --create-namespace \
+		--values helm/vllm-server/values-cpu-dev.yaml
+
+.PHONY: install-keda-scaler
+install-keda-scaler: ## Deploy KEDA ScaledObject (KV-cache pressure + queue depth triggers)
+	helm install keda-scaler helm/keda-scaler \
+		--namespace vllm \
+		--values helm/keda-scaler/values.yaml
+
+.PHONY: tear-down
+tear-down: ## Uninstall all charts (keeps cluster up)
+	-helm uninstall keda-scaler -n vllm
+	-helm uninstall vllm-server -n vllm
+	-helm uninstall signoz -n platform
+	-helm uninstall prometheus -n monitoring
+	-helm uninstall keda -n keda
 
 # ── Dev helpers ───────────────────────────────────────────────────────────────
 

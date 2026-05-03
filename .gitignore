@@ -1,0 +1,43 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit these
+*.env
+*.key
+*.pem
+credentials.json
+service-account.json
+
+# Helm
+**/charts/*.tgz
+
+# Load test results
+load-test/results/
+
+# >>> atlan-builders >>>
+# Managed by atlan-core — edit inside this block and it will be preserved
+# only until the next bootstrap tick. Add your own rules outside the block.
+.atlan/journal/pending.jsonl
+.atlan/journal/.drafts/
+.atlan/cache/
+# <<< atlan-builders <<<

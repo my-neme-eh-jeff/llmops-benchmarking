@@ -1,60 +1,90 @@
-# vLLM server Helm values
-# For local dev, we use a tiny CPU-compatible model.
-# For production (Sarvam-M), flip gpu.enabled and update model.name.
+# vLLM Helm values — DEFAULT IS GPU PRODUCTION.
+# For local CPU dev (vind / RTX 2060), use:
+#   helm install vllm-server helm/vllm-server -f helm/vllm-server/values-cpu-dev.yaml
 
 model:
-  # Dev model: tiny, runs on CPU, no GPU needed
-  # Prod model: "sarvamai/sarvam-m" (requires GPU)
-  name: "facebook/opt-125m"
-  # HuggingFace token — required for gated models like Sarvam-M
+  # Qwen3-8B-Instruct AWQ-INT4 — popular 2026 open model from Alibaba.
+  # ~5GB weights at INT4; fits comfortably on L4 (24GB) with KV-cache headroom.
+  # Swap to "Qwen/Qwen2.5-7B-Instruct-AWQ" if Qwen3 has any compatibility issue.
+  # Swap to "sarvamai/sarvam-m" once we have that gated-model HF token + larger GPU.
+  name: "Qwen/Qwen3-8B-Instruct-AWQ"
+
+  # HuggingFace token — required only for gated models (Sarvam-M, Llama 3, etc.)
+  # Open models like Qwen don't need this.
   hfToken: ""
 
+# Initial replica count. KEDA's ScaledObject will scale this 0-3 in production.
+# Set to 1 here so a fresh `helm install` produces a working pod before KEDA
+# starts driving the count.
 replicaCount: 1
 
 image:
   repository: vllm/vllm-openai
-  tag: "v0.6.0"
+  tag: "v0.6.3"
   pullPolicy: IfNotPresent
 
 service:
   type: ClusterIP
   port: 8000
 
+# GPU resource request. Both `requests` and `limits` must include
+# nvidia.com/gpu, or the pod won't get a GPU attached.
+# CPU/memory shapes leave headroom for vLLM's CPU-side overhead (tokenizer,
+# request scheduler, Prometheus exporter).
 resources:
   requests:
-    cpu: "2"
-    memory: "4Gi"
-  limits:
     cpu: "4"
-    memory: "8Gi"
-    # GPU is disabled for local dev — vLLM falls back to CPU for small models.
-    # Uncomment for production:
-    # nvidia.com/gpu: "1"
+    memory: "16Gi"
+    nvidia.com/gpu: "1"
+  limits:
+    cpu: "8"
+    memory: "24Gi"
+    nvidia.com/gpu: "1"
 
 gpu:
-  enabled: false
+  enabled: true
 
-# vLLM server args
-# --disable-log-requests keeps logs clean during load tests
-# --max-model-len caps sequence length — important for KV cache sizing
+# Schedule only on the L4 GPU pool (provisioned in gcp/gpu-pool.tf).
+# Without this, the pod could land on a CPU node and crash trying to find a GPU.
+nodeSelector:
+  accelerator: nvidia-l4
+
+# Tolerate the GPU pool's NoSchedule taint. The taint exists so non-GPU
+# workloads (KEDA, Prometheus, SigNoz) don't waste expensive L4 nodes.
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Equal
+    value: present
+    effect: NoSchedule
+
+# vLLM server arguments.
+#   --quantization awq        : AWQ-INT4 path; vLLM doesn't auto-detect from model card
+#   --max-model-len 4096      : context window; caps KV cache size
+#   --gpu-memory-utilization  : how much VRAM to claim (0.9 leaves room for other procs)
+#   --disable-log-requests    : keeps logs clean during load tests
 vllm:
   args:
     - "--host"
     - "0.0.0.0"
     - "--port"
     - "8000"
+    - "--quantization"
+    - "awq"
     - "--max-model-len"
-    - "2048"
+    - "4096"
+    - "--gpu-memory-utilization"
+    - "0.9"
     - "--disable-log-requests"
 
-# Prometheus scraping — ServiceMonitor tells Prometheus where to scrape
+# Prometheus scraping — ServiceMonitor (templates/servicemonitor.yaml) tells
+# Prometheus where to scrape. Must be labeled `release: prometheus` in the
+# template to match kube-prometheus-stack's default selector.
 metrics:
   enabled: true
-  # vLLM exposes /metrics on the same port as the inference API
   path: /metrics
   port: 8000
 
+# Native HPA is DISABLED. KEDA owns autoscaling for this Deployment via the
+# helm/keda-scaler chart. Two HPAs targeting the same Deployment fight.
 autoscaling:
-  # We do NOT use HPA here — HPA uses CPU/memory which are meaningless for GPU inference.
-  # Scaling is handled by KEDA watching vllm:num_requests_waiting from Prometheus.
   enabled: false

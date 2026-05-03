@@ -1,0 +1,20 @@
+# Terraform state files
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Terraform directories
+.terraform/
+
+# Local override files
+*.auto.tfvars
+*.tfvars.local
+
+# Project-specific values — never commit (contains GCP project ID).
+# Copy terraform.tfvars.example to terraform.tfvars and fill in your own values.
+terraform.tfvars
+
+# IDE
+.idea/
+*.swp
+*.swo
