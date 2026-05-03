@@ -20,27 +20,6 @@ This project watches the right signal (GPU memory) and adds replicas *before* us
 - Deployment is GKE Standard + `g2-standard-8` spot pool, `NoSchedule`-tainted so only vLLM pods land on it. `minReplicaCount: 0` lets the pool drain to zero between bursts — hourly cost drops to ~$0.10 (control plane only).
 - Helm-packaged for two shapes: `vind` (local CPU dev with `opt-125m`) and GKE GPU prod (`Qwen3-8B-Instruct AWQ-INT4` on L4).
 
----
-
-## 🚀 Try it live
-
-```bash
-curl -X POST <API>/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-8B-Instruct-AWQ",
-    "messages": [{"role": "user", "content": "Explain KV cache eviction in three sentences."}],
-    "max_tokens": 256
-  }'
-```
-
-The cluster is brought up only for demos, so live URLs aren't pinned here. They appear in the demo video.
-
-## 🎬 Demo video
-
-*Coming soon!*
-
----
 
 ## 📐 Architecture
 
